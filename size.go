@@ -52,7 +52,7 @@ func unwrapLoc(loc string) (string, error) {
 		return "", errors.New("too busy")
 	}
 
-	loc = loc[:]
+	loc = loc[i:]
 
 	// rxBQI 에 해당하는 문자의 길이가 항상 5 글자인 것 같으나 보장되지 않았으므로
 	// 안전하게 "/"" 이전 까지를 반환한다.
