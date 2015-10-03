@@ -5,13 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"github.com/klauspost/shutdown"
-	// "github.com/mattn/go-sqlite3"
-	"io"
+	_ "github.com/mattn/go-sqlite3"
 	"log"
 	"net/http"
 	"os"
 	"runtime"
-	// "strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -42,7 +40,7 @@ func newDB(name string) (err error) {
 		CREATE TABLE IF NOT EXISTS new ( Code TEXT UNIQUE );
 
 		CREATE TABLE IF NOT EXISTS card (
-			When DATETIME DEFAULT CURRENT_TIMESTAMP,
+			Time DATETIME DEFAULT CURRENT_TIMESTAMP,
 
 			/* 비교 대상 데이터 집합 크기 */
 			a INTEGER UNIQUE,
@@ -51,21 +49,20 @@ func newDB(name string) (err error) {
 			r INTEGER,
 
 			/* 표본 데이터 갯수 */
-			N INTEGER,
+			N INTEGER
 		);
 
 		CREATE TRIGGER IF NOT EXISTS trigger_exist_code BEFORE INSERT ON new
 		WHEN new.Code IN comparison
 		BEGIN
-			INSERT OR REPLACE INTO card
-			SELECT
-				coalesce(card.When, CURRENT_TIMESTAMP),
-				comparison.a,
+			INSERT OR REPLACE INTO card SELECT
+				coalesce(card.Time, CURRENT_TIMESTAMP),
+				comp.a,
 				coalesce(card.r, 0) + 1,
 				coalesce(card.N, 0) + 1
 			FROM
-				SELECT COUNT(*) AS a FROM comparison
-				LEFT JOIN SELECT * FROM card ON card.a = comparison.a;
+				(SELECT COUNT(*) AS a FROM comparison) AS comp
+				LEFT JOIN card ON card.a = comp.a;
 
 			SELECT RAISE(IGNORE);
 		END;
@@ -75,13 +72,13 @@ func newDB(name string) (err error) {
 		BEGIN
 			INSERT OR REPLACE INTO card
 			SELECT
-				coalesce(card.When, CURRENT_TIMESTAMP),
-				comparison.a,
+				coalesce(card.Time, CURRENT_TIMESTAMP),
+				comp.a,
 				coalesce(card.r, 0),
 				coalesce(card.N, 0) + 1
 			FROM
-				SELECT COUNT(*) AS a FROM comparison
-				LEFT JOIN SELECT * FROM card ON card.a = comparison.a;
+				(SELECT COUNT(*) AS a FROM comparison) AS comp
+				LEFT JOIN card ON card.a = comp.a;
 		END;
 	`
 
@@ -91,12 +88,6 @@ func newDB(name string) (err error) {
 	}
 
 	return
-}
-
-func WrapCloser(closer io.Closer) {
-	shutdown.FirstFunc(func(x interface{}) {
-		closer.Close()
-	}, nil)
 }
 
 func Contains(set []string, str string) bool {
@@ -163,7 +154,7 @@ func UpdateIndexHandler(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 
-	fmt.Fprintf(w, "(Update) %10d", rowcount)
+	fmt.Fprintf(w, "All %10d", rowcount)
 
 	return nil
 }
@@ -183,10 +174,20 @@ func Update() {
 
 	http.Handle("/", engine(UpdateIndexHandler))
 
-	for code := range CodePool() {
-		database.Lock()
-		stmt.Exec(string(code))
-		database.Unlock()
+	codec := CodePool()
+	notifier := shutdown.First()
+
+	for {
+		select {
+		case code := <-codec:
+			database.Lock()
+			stmt.Exec(string(code))
+			database.Unlock()
+		case n := <-notifier:
+			stmt.Close()
+			close(n)
+			return
+		}
 	}
 }
 
@@ -216,31 +217,54 @@ func BloatHandler(w http.ResponseWriter, req *http.Request) error {
 }
 
 func Bloat() {
-	stmt, _ := database.Prepare("INSERT INTO new (code) VALUES (?)")
+	stmt, err := database.Prepare("INSERT INTO new (code) VALUES (?)")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
 	http.Handle("/", engine(BloatHandler))
 	http.Handle("/card", engine(CardHandler))
 
-	for code := range CodePool() {
-		database.Lock()
-		stmt.Exec(string(code))
-		database.Unlock()
+	codec := CodePool()
+	notifier := shutdown.First()
+
+	for {
+		select {
+		case code := <-codec:
+			database.Lock()
+			stmt.Exec(string(code))
+			database.Unlock()
+		case n := <-notifier:
+			stmt.Close()
+			close(n)
+			return
+		}
 	}
 }
 
 func CardHandler(w http.ResponseWriter, req *http.Request) error {
-	var when time.Time
-	var a, r, N int
 
 	database.RLock()
-	row := database.QueryRow("SELECT * FROM card WHERE card.a = (SELECT COUNT(*) FROM comparison)")
-	err := row.Scan(&when, &a, &r, &N)
+	rows, err := database.Query("SELECT * FROM card ORDER BY Time DESC")
 	database.RUnlock()
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(w, "%s a = %10d, r = %10d, N = %10d", when, a, r, N)
+	defer rows.Close()
+
+	for rows.Next() {
+		var when time.Time
+		var a, r, N int
+
+		if err := rows.Scan(&when, &a, &r, &N); err != nil {
+			return nil
+		}
+		
+		fmt.Fprintf(w, "%s a = %10d, r = %10d, N = %10d\n", when, a, r, N)
+	}
+
 	return nil
 }
 
@@ -280,7 +304,12 @@ func main() {
 
 	runtime.GOMAXPROCS(*cpu)
 	shutdown.OnSignal(0, os.Interrupt, os.Kill, syscall.SIGTERM)
-	WrapCloser(database)
+
+	shutdown.ThirdFunc(func(interface{}) {
+		database.Lock()
+		database.Close()
+		database.Unlock()
+	}, nil)
 
 	go func() {
 		log.Fatal(http.ListenAndServe(":8080", nil))
