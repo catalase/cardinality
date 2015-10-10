@@ -17,7 +17,7 @@ import (
 
 var cpu = flag.Int("cpu", runtime.NumCPU(), "cpu")
 
-var para = flag.Int("para", 25, "para")
+var parallel = flag.Int("parallel", 25, "parallel")
 
 type Code string
 
@@ -103,7 +103,7 @@ func Contains(set []string, str string) bool {
 func CodePool() chan Code {
 	codec := make(chan Code)
 
-	for i := 0; i < *para; i++ {
+	for i := 0; i < *parallel; i++ {
 		go func() {
 			for {
 				code, err := One()
@@ -244,7 +244,6 @@ func Bloat() {
 }
 
 func CardHandler(w http.ResponseWriter, req *http.Request) error {
-
 	database.RLock()
 	rows, err := database.Query("SELECT * FROM card ORDER BY Time DESC")
 	database.RUnlock()
@@ -272,13 +271,13 @@ func Card() {
 	http.Handle("/", engine(BloatHandler))
 	http.Handle("/card", engine(CardHandler))
 
-	select {}
+	select{}
 }
 
 func usage() {
 	fmt.Fprintln(
 		os.Stderr,
-		os.Args[0], "update | bloat | card [-cpu] [-para]",
+		os.Args[0], "update | bloat | card [-cpu] [-parallel]",
 	)
 	flag.PrintDefaults()
 }
